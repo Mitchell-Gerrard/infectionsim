@@ -20,10 +20,11 @@ def subsample_frames(*arrays, step):
         result.append(arr[idxs])
     return result
 class InfectionSim:
-    def __init__(self,infection_func, recovery_time):
+    def __init__(self,infection_func, recovery_time, maximum_transmission_distance=2.0):
         self.infection_func = infection_func #function that determines infection spread
         self.recovery_time = recovery_time #time for an infected individual to recover in days
-    def run_simulation(self, population_size, area_size_x, area_size_y, initial_infected, total_time,units,dt = 30,records_interval=10):
+        self.maximum_transmission_distance = maximum_transmission_distance #maximum distance for transmission
+    def run_simulation(self, population_size, area_size_x, area_size_y, initial_infected, total_time,units,dt = 30,records_interval=10, contact_interval_seconds=None):
         # Initialize population
 
 
@@ -52,7 +53,11 @@ class InfectionSim:
         define_revcovered = 1e10
         all_positions = np.zeros((int(steps//day_conversion), population_size, 2))
         all_status = np.zeros((int(steps//day_conversion), population_size))
-        contact_interval = 15
+        # Determine contact-check cadence in simulation steps.
+        # If `contact_interval_seconds` is None, preserve previous behaviour (~15 steps).
+        if contact_interval_seconds is None:
+            contact_interval_seconds = 15 * dt
+        contact_interval_steps = max(1, int(round(contact_interval_seconds / dt)))
         for step in range(steps):
             
             speed_distribution = np.abs(np.random.normal(speed, speed_varriation, population_size)) * dt
@@ -61,9 +66,9 @@ class InfectionSim:
                                              speed_distribution * np.sin(angles)))
             positions += displacements
             positions = np.mod(positions, [area_size_x, area_size_y])
-            if step % contact_interval == 0:
+            if step % contact_interval_steps == 0:
                 tree = KDTree(positions)
-                result=tree.query_pairs(r=2.0)
+                result=tree.query_pairs(r=self.maximum_transmission_distance)
                 for i, j in result:
                     if status[i] >= 1 and status[j] >= 1:
                         continue
@@ -90,7 +95,7 @@ class InfectionSim:
         I=np.sum((all_status > 0) & (all_status != define_revcovered), axis=1)
         R=np.sum(all_status == define_revcovered, axis=1)
         return all_positions, S, I, R, all_status, define_revcovered
-    def multi_run_simulation(self, num_runs, population_size, area_size_x, area_size_y, initial_infected, total_time, units, dt=30, records_interval=10):
+    def multi_run_simulation(self, num_runs, population_size, area_size_x, area_size_y, initial_infected, total_time, units, dt=30, records_interval=10, contact_interval_seconds=None):
         population_size = population_size*np.ones(num_runs,dtype=int)
         print("Starting multi-run simulation with", num_runs, "runs...")
         all_positions = []
@@ -101,15 +106,15 @@ class InfectionSim:
         recovered_time_stepss = []
         
         with concurrent.futures.ProcessPoolExecutor() as executor:
-                results = [executor.submit(self.run_simulation, int(population_size[i]), area_size_x, area_size_y, initial_infected, total_time, units, dt, records_interval) for i in range(num_runs)]
-                for f in concurrent.futures.as_completed(results):
-                    positions, S, I, R, all_status, recovered_time_steps = f.result()
-                    all_positions.append(positions)
-                    Ss.append(S)
-                    Is.append(I)
-                    Rs.append(R)
-                    recovered_time_stepss.append(recovered_time_steps)
-                    all_statuss.append(all_status)
+            results = [executor.submit(self.run_simulation, int(population_size[i]), area_size_x, area_size_y, initial_infected, total_time, units, dt, records_interval, contact_interval_seconds) for i in range(num_runs)]
+            for f in concurrent.futures.as_completed(results):
+                positions, S, I, R, all_status, recovered_time_steps = f.result()
+                all_positions.append(positions)
+                Ss.append(S)
+                Is.append(I)
+                Rs.append(R)
+                recovered_time_stepss.append(recovered_time_steps)
+                all_statuss.append(all_status)
         all_positions = np.asarray(all_positions)
         Ss = np.asarray(Ss)
         Is = np.asarray(Is)
@@ -119,7 +124,7 @@ class InfectionSim:
         betas = []
         gammas = []
         for i in range(num_runs):
-            fit_results = sim.fiting_SIR(Ss[i], Is[i], Rs[i], recovered_time_stepss[i], dt=1/records_interval)  # dt in days
+            fit_results = self.fiting_SIR(Ss[i], Is[i], Rs[i], recovered_time_stepss[i], dt=1/records_interval)  # dt in days
             recovered_time_steps = int(self.recovery_time * (24*60*60) * (1/dt))
             plt.plot(Ss[i], color='blue', linestyle='--', alpha=0.3)
             plt.plot(Is[i], color='red', linestyle='--', alpha=0.3)
